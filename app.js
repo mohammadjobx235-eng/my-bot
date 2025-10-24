@@ -7,7 +7,7 @@ const { saveUserData, getUsersBySpecialization, deleteUserByTelegramId } = requi
 const { STATES, SPECIALIZATION_MAP } = require('./src/constants');
 
 // --- إعدادات البوت والاتصال ---
-
+//mongodb://localhost:27017/telegram_bot_db
 const TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -85,23 +85,23 @@ function handleAskUsername(msg) {
     );
 }
 
-/** * معالجة اختيار التخصص وحفظه. */
+// app.js
+
 function handleSpecializationSelection(chatId, specializationKey, messageId) {
     const specializationName = SPECIALIZATION_MAP[specializationKey];
 
     if (specializationName) {
         userStates[chatId].data.specialization = specializationName;
         userStates[chatId].state = STATES.ASK_TECHNOLOGIES;
+        
+        // **✅ التعديل هنا: نغير النص لضمان عدم ظهور خطأ "not modified"**
         bot.editMessageText(
-            `تم اختيار التخصص: **${specializationName}**.\n\n` +
-
-            "الآن، يرجى إدخال التقنيات التي تعلمتها او بدأت بتعلمها  ",
-           
+            `✅ تم اختيار التخصص: **${specializationName}**.\n\n` +
+            "الآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها...",
             { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
         );
     }
 }
-
 /** * يعالج إدخال التقنيات ويحفظ كل البيانات. */
 async function handleAskTechnologies(msg) {
     const chatId = msg.chat.id;
