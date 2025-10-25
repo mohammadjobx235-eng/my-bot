@@ -1,8 +1,10 @@
 // app.js
-// ملف التشغيل الرئيسي للبوت باستخدام نظام البولينج (Polling)
+// ملف التشغيل الرئيسي للبوت باستخدام نظام Webhooks (خدمة ويب)
 
 require('dotenv').config(); // تحميل متغيرات البيئة من .env
+const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
+
 // استيراد الدوال من الملفات المساعدة
 const { connectDB } = require('./src/db_connect');
 const { saveUserData, getUsersBySpecialization, deleteUserByTelegramId } = require('./src/user_model');
@@ -11,13 +13,22 @@ const { STATES, SPECIALIZATION_MAP } = require('./src/constants');
 // --- إعدادات البوت والاتصال ---
 const TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
+// المنفذ الذي سيستمع إليه الخادم (Render يحدد هذا تلقائياً)
+const PORT = process.env.PORT || 3000; 
+// يجب أن يكون هذا هو رابط الخدمة العام على Render
+const WEBHOOK_URL = process.env.WEBHOOK_URL; 
 
-// إنشاء مثيل للبوت باستخدام البولينج (Polling)
-const bot = new TelegramBot(TOKEN, { polling: true });
+// إنشاء مثيل للبوت بنظام Webhook
+// نستخدم خاصية 'webHook: false' لتجنب إنشاء خادم داخلي، وسنستخدم Express بدلاً منه
+const bot = new TelegramBot(TOKEN, { webHook: { port: PORT } });
+const app = express();
 
 // تخزين حالة المحادثة للمستخدمين
 // {chatId: {state: 'ASK_NAME', data: {name: '', username: '', specialization: ''}}}
 const userStates = {}; 
+
+// --- إعدادات Express ---
+app.use(express.json()); // ضروري لمعالجة تحديثات تلغرام المرسلة كـ JSON
 
 // --- دوال البوت المساعدة ---
 
@@ -36,7 +47,7 @@ function editMessage(chatId, messageId, text, replyMarkup = null, parseMode = 'M
 
     bot.editMessageText(text, options)
         .catch(error => {
-            // يتم تجاهل خطأ "message is not modified" لتجنب إظهاره في Console
+            // يتم تجاهل خطأ "message is not modified"
             if (!error.response || !error.response.body || !error.response.body.description.includes('message is not modified')) {
                 console.error('Error editing message:', error.message);
             }
@@ -96,7 +107,6 @@ bot.onText(/\/view/, (msg) => {
 
 // --- دوال معالجة الرسائل حسب الحالة ---
 
-/** * يعالج إدخال الاسم وينتقل إلى سؤال معرّف التلغرام. */
 function handleAskName(msg) {
     const chatId = msg.chat.id;
     const userName = msg.text.trim();
@@ -105,17 +115,15 @@ function handleAskName(msg) {
     userStates[chatId].state = STATES.ASK_USERNAME; 
     
     bot.sendMessage(chatId,
-        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك. إذا لم يكن لديك معرّف، يرجى كتابة "لا يوجد".`,
+        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك.".`,
         { parse_mode: 'Markdown' }
     );
 }
 
-/** * يعالج إدخال معرّف التلغرام وينتقل إلى سؤال التخصص. */
 function handleAskUsername(msg) {
     const chatId = msg.chat.id;
     const username = msg.text.trim(); 
 
-    // توحيد تنسيق اسم المستخدم
     const cleanUsername = username === 'لا يوجد' ? 'لا يوجد' : (username.startsWith('@') ? username.substring(1) : username);
     
     userStates[chatId].data.username = cleanUsername; 
@@ -135,13 +143,11 @@ function handleAskUsername(msg) {
     );
 }
 
-/** * يعالج إدخال التقنيات ويحفظ كل البيانات. */
 async function handleAskTechnologies(msg) {
     const chatId = msg.chat.id;
     const userId = msg.from.id; // Telegram User ID
     const technologies = msg.text.trim();
     
-    // التحقق من اكتمال البيانات قبل الحفظ
     if (!userStates[chatId] || !userStates[chatId].data.name || !userStates[chatId].data.specialization) {
         bot.sendMessage(chatId, "عذراً، يبدو أن عملية التسجيل لم تكتمل. يرجى البدء من جديد باستخدام /start.");
         userStates[chatId] = { state: STATES.IDLE, data: {} };
@@ -172,7 +178,6 @@ async function handleAskTechnologies(msg) {
 
 // --- معالجات الـ Callback Query ---
 
-/** * يعالج اختيار التخصص وينتقل إلى سؤال التقنيات. */
 function handleSpecializationSelection(chatId, specializationKey, messageId) {
     const specializationName = SPECIALIZATION_MAP[specializationKey];
 
@@ -180,14 +185,12 @@ function handleSpecializationSelection(chatId, specializationKey, messageId) {
         userStates[chatId].data.specialization = specializationName;
         userStates[chatId].state = STATES.ASK_TECHNOLOGIES;
         
-        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\nالآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها (مثل: Python, TensorFlow, Keras). يفضل الفصل بينها بفاصلة.`;
+        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\n يرجى ادخال التقنيات التي تعلمتها او تعمل على تعلمها `;
         
-        // تعديل الرسالة
         editMessage(chatId, messageId, newText);
     }
 }
 
-/** * معالجة ردود تأكيد حذف البيانات. */
 async function handleDeleteConfirmation(chatId, userId, data, messageId) {
     userStates[chatId] = { state: STATES.IDLE, data: {} }; 
 
@@ -209,7 +212,6 @@ async function handleDeleteConfirmation(chatId, userId, data, messageId) {
     }
 }
 
-/** * معالجة ردود عرض البيانات (بعد اختيار التخصص). */
 async function handleViewDataCallback(chatId, data, messageId) {
     const specializationKey = data.replace('view_', '');
     const specializationName = SPECIALIZATION_MAP[specializationKey];
@@ -225,7 +227,6 @@ async function handleViewDataCallback(chatId, data, messageId) {
             users.forEach((user, index) => {
                 responseText += `${index + 1}. **الاسم:** ${user.name}\n`;
                 
-                // تنسيق الاتصال
                 const contact = user.telegram_username && user.telegram_username !== 'لا يوجد' 
                                 ? `@${user.telegram_username}` 
                                 : 'لا يوجد معرف تلغرام متاح';
@@ -247,16 +248,13 @@ async function handleViewDataCallback(chatId, data, messageId) {
 // *** المعالج الشامل للرسائل النصية (Message Handler) ***
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
-    // جلب الحالة الحالية
     const state = userStates[chatId] ? userStates[chatId].state : STATES.IDLE;
     const text = msg.text;
 
-    // تجاهل الأوامر التي تبدأ بـ /
     if (text && text.startsWith('/')) {
         return;
     }
 
-    // التبديل بين حالات إدخال البيانات
     switch (state) {
         case STATES.ASK_NAME:
             handleAskName(msg);
@@ -283,31 +281,54 @@ bot.on('callback_query', (callbackQuery) => {
     const data = callbackQuery.data;
     const userId = callbackQuery.from.id;
 
-    // إغلاق الإشعار الصغير
     bot.answerCallbackQuery(callbackQuery.id);
 
-    // معالجة اختيار التخصص
     if (userStates[chatId] && userStates[chatId].state === STATES.ASK_SPECIALIZATION) {
-        // التحقق من أن البيانات هي مفتاح تخصص صحيح
         if (Object.keys(SPECIALIZATION_MAP).includes(data)) {
             handleSpecializationSelection(chatId, data, message.message_id);
         }
     } 
-    // معالجة عرض البيانات
     else if (data.startsWith('view_')) {
         handleViewDataCallback(chatId, data, message.message_id);
     }
-    // معالجة تأكيد الحذف
     else if (userStates[chatId] && userStates[chatId].state === STATES.AWAIT_DELETE_CONFIRMATION) {
         handleDeleteConfirmation(chatId, userId, data, message.message_id);
     }
 });
 
 
-// --- التشغيل ---
+// --- إعداد وتفعيل Webhook ---
 
-connectDB(MONGO_URI).then(() => {
-    console.log('Bot is ready to receive messages and polling started.');
-}).catch(err => {
-    console.error('Failed to initialize bot due to DB connection error.', err);
+// نقطة نهاية للتحقق من حالة الخادم
+app.get('/', (req, res) => {
+    res.send('Telegram Bot Webhook Server is running.');
 });
+
+// نقطة النهاية التي سيتصل بها تلغرام
+const WEBHOOK_PATH = `/bot${TOKEN}`; // يجب أن يكون المسار معقداً لمنع الوصول العشوائي
+app.post(WEBHOOK_PATH, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200); // يجب أن يرد الخادم برمز 200 لتيليجرام بسرعة
+});
+
+async function setupWebhookAndServer() {
+    try {
+        await connectDB(MONGO_URI);
+        
+        // تعيين Webhook
+        const fullWebHookUrl = `${WEBHOOK_URL}${WEBHOOK_PATH}`;
+        await bot.setWebHook(fullWebHookUrl);
+        console.log(`Webhook set to: ${fullWebHookUrl}`);
+
+        // بدء تشغيل Express Server
+        app.listen(PORT, () => {
+            console.log(`Express server listening on port ${PORT}`);
+        });
+
+    } catch (err) {
+        console.error('Failed to initialize bot and server:', err);
+        process.exit(1); 
+    }
+}
+
+setupWebhookAndServer();
