@@ -125,7 +125,7 @@ async function handleAskName(msg, user) {
     await updateUserState(userId, STATES.ASK_USERNAME, newRegistrationData); 
     
     bot.sendMessage(chatId,
-        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك. إذا لم يكن لديك معرّف، يرجى كتابة "لا يوجد".`,
+        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك. ".`,
         { parse_mode: 'Markdown' }
     );
 }
@@ -201,7 +201,7 @@ async function handleSpecializationSelection(chatId, userId, specializationKey, 
         const newRegistrationData = { ...user.data, specialization: specializationName };
         await updateUserState(userId, STATES.ASK_TECHNOLOGIES, newRegistrationData);
         
-        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\nالآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها (مثل: Python, TensorFlow, Keras). يفضل الفصل بينها بفاصلة.`;
+        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\nالآن، يرجى إدخال قائمة بالتقنيات التي تعلمتها او تتعلم عليها  .`;
         
         editMessage(chatId, messageId, newText);
     }
