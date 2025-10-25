@@ -63,7 +63,9 @@ async function connectDB(uri) {
         });
         console.log('MongoDB connected successfully. ✅');
     } catch (err) {
-        console.error('MongoDB connection error: تحقق من MONGO_URI وإعدادات IP Whitelist في Atlas.', err.message);
+        console.error('🔴 فشل الاتصال بقاعدة البيانات. تحقق من URI و IP Whitelist.', err.message);
+        // رمي الخطأ للخارج لمنع تشغيل الخادم
+        throw err; 
     }
 }
 
@@ -110,55 +112,6 @@ async function getUsersBySpecialization(specialization) {
 }
 
 // ----------------------------------------------------
-// دوال البوت (Bot Handlers - Message Commands)
-// ----------------------------------------------------
-
-/** يبدأ عملية إدخال البيانات. */
-bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    userStates[chatId] = { state: STATES.ASK_NAME, data: { telegramId: msg.from.id } };
-    bot.sendMessage(chatId, "أهلاً بك! لنبدأ بتسجيل بياناتك. ما هو اسمك الكامل؟");
-});
-
-/** يلغي عملية إدخال البيانات. */
-bot.onText(/\/cancel/, (msg) => {
-    const chatId = msg.chat.id;
-    userStates[chatId] = { state: STATES.IDLE, data: {} };
-    bot.sendMessage(chatId, "تم إلغاء عملية إدخال البيانات. يمكنك البدء من جديد باستخدام الأمر /start.");
-});
-
-/** يبدأ عملية حذف البيانات. */
-bot.onText(/\/delete/, (msg) => {
-    const chatId = msg.chat.id;
-    const keyboard = [
-        [{ text: "نعم، متأكد من الحذف", callback_data: 'confirm_delete' }],
-        [{ text: "إلغاء الحذف", callback_data: 'cancel_delete' }],
-    ];
-    
-    userStates[chatId] = { state: STATES.AWAIT_DELETE_CONFIRMATION, data: {} }; 
-
-    bot.sendMessage(chatId,
-        "**تنبيه:** هل أنت متأكد من أنك تريد حذف جميع بياناتك المسجلة؟ لا يمكن التراجع عن هذا الإجراء.",
-        { reply_markup: { inline_keyboard: keyboard }, parse_mode: 'Markdown' }
-    );
-});
-
-/** يبدأ عملية عرض البيانات. */
-bot.onText(/\/view/, (msg) => {
-    const chatId = msg.chat.id;
-    const keyboard = [
-        [{ text: "عرض الذكاء الاصطناعي", callback_data: 'view_AI' }],
-        [{ text: "عرض البرمجيات", callback_data: 'view_Software' }],
-        [{ text: "عرض الشبكات", callback_data: 'view_Networks' }],
-    ];
-    bot.sendMessage(chatId,
-        "اختر التخصص الذي تود عرض بيانات المسجلين فيه:",
-        { reply_markup: { inline_keyboard: keyboard } }
-    );
-});
-
-
-// ----------------------------------------------------
 // دوال البوت (Bot Handlers - Message & Callback Logic)
 // ----------------------------------------------------
 
@@ -172,7 +125,7 @@ function handleSpecializationSelection(chatId, specializationKey, messageId) {
         
         bot.editMessageText(
             `✅ تم اختيار التخصص: **${specializationName}**.\n\n` +
-            "الآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها (مثل: Python, React, Cisco).",
+            "الآن، يرجى إدخال قائمة بالتقنيات التي تعلمتها او تتعلم عليها .",
             { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
         );
     }
@@ -354,20 +307,28 @@ app.get('/', (req, res) => {
 });
 
 // 3. بدء الاتصال بقاعدة البيانات ثم تشغيل الخادم
-connectDB(MONGO_URI).then(() => {
-    app.listen(PORT, () => {
-        console.log(`Express server is listening on port ${PORT}`);
+async function startServer() {
+    try {
+        await connectDB(MONGO_URI);
         
-        // تعيين الـ Webhook على تيليجرام
-        const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL || 'YOUR_PUBLIC_URL_HERE'}${WEBHOOK_URL_PATH}`;
+        app.listen(PORT, () => {
+            console.log(`Express server is listening on port ${PORT}`);
+            
+            const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL || 'YOUR_PUBLIC_URL_HERE'}${WEBHOOK_URL_PATH}`;
 
-        if (process.env.RENDER_EXTERNAL_URL) {
-            bot.setWebHook(fullWebhookUrl)
-                .then(() => console.log(`Webhook successfully set to: ${fullWebhookUrl}`))
-                .catch(err => console.error('Error setting webhook:', err));
-        } else {
-            // هذا الجزء فقط للبيئات التي لا تحدد الرابط الخارجي تلقائياً
-            console.warn('RENDER_EXTERNAL_URL is not defined. Webhook not set. Please set it manually for production.');
-        }
-    });
-});
+            if (process.env.RENDER_EXTERNAL_URL) {
+                bot.setWebHook(fullWebhookUrl)
+                    .then(() => console.log(`Webhook successfully set to: ${fullWebhookUrl}`))
+                    .catch(err => console.error('Error setting webhook:', err));
+            } else {
+                console.warn('RENDER_EXTERNAL_URL is not defined. Webhook not set. Please set it manually for production.');
+            }
+        });
+    } catch (error) {
+        console.error('🔴 فشل حرج: تعذر الاتصال بقاعدة البيانات. إيقاف تشغيل التطبيق.');
+        // إيقاف تشغيل العملية إذا فشل الاتصال بقاعدة البيانات
+        process.exit(1); 
+    }
+}
+
+startServer();
