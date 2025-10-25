@@ -1,5 +1,6 @@
 // app.js
 // ملف التشغيل الرئيسي للبوت باستخدام نظام Webhooks (خدمة ويب)
+// ** تم تحديث إدارة الحالة لـ MongoDB لضمان ثبات الخدمة (Persistence) **
 
 require('dotenv').config(); // تحميل متغيرات البيئة من .env
 const express = require('express');
@@ -7,7 +8,8 @@ const TelegramBot = require('node-telegram-bot-api');
 
 // استيراد الدوال من الملفات المساعدة
 const { connectDB } = require('./src/db_connect');
-const { saveUserData, getUsersBySpecialization, deleteUserByTelegramId } = require('./src/user_model');
+// استيراد الدوال الجديدة من user_model.js للتعامل مع الحالة في MongoDB
+const { saveUserData, getUsersBySpecialization, deleteUserByTelegramId, getOrCreateUser, updateUserState } = require('./src/user_model');
 const { STATES, SPECIALIZATION_MAP } = require('./src/constants');
 
 // --- إعدادات البوت والاتصال ---
@@ -19,13 +21,8 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL; 
 
 // إنشاء مثيل للبوت بنظام Webhook
-// نستخدم خاصية 'webHook: false' لتجنب إنشاء خادم داخلي، وسنستخدم Express بدلاً منه
 const bot = new TelegramBot(TOKEN, { webHook: { port: PORT } });
 const app = express();
-
-// تخزين حالة المحادثة للمستخدمين
-// {chatId: {state: 'ASK_NAME', data: {name: '', username: '', specialization: ''}}}
-const userStates = {}; 
 
 // --- إعدادات Express ---
 app.use(express.json()); // ضروري لمعالجة تحديثات تلغرام المرسلة كـ JSON
@@ -57,22 +54,32 @@ function editMessage(chatId, messageId, text, replyMarkup = null, parseMode = 'M
 // --- معالجات الأوامر ---
 
 /** * يبدأ عملية إدخال البيانات. */
-bot.onText(/\/start/, (msg) => {
+bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    userStates[chatId] = { state: STATES.ASK_NAME, data: {} };
+    const userId = msg.from.id;
+    
+    // حفظ الحالة والبيانات المؤقتة في قاعدة البيانات
+    await updateUserState(userId, STATES.ASK_NAME, {}); 
+    
     bot.sendMessage(chatId, "أهلاً بك! لنبدأ بتسجيل بياناتك. ما هو اسمك الكامل؟");
 });
 
 /** * يلغي عملية إدخال البيانات. */
-bot.onText(/\/cancel/, (msg) => {
+bot.onText(/\/cancel/, async (msg) => {
     const chatId = msg.chat.id;
-    userStates[chatId] = { state: STATES.IDLE, data: {} };
+    const userId = msg.from.id;
+    
+    // إعادة تعيين الحالة والبيانات
+    await updateUserState(userId, STATES.IDLE, {}); 
+    
     bot.sendMessage(chatId, "تم إلغاء عملية إدخال البيانات. يمكنك البدء من جديد باستخدام الأمر /start.");
 });
 
 /** * يبدأ عملية حذف البيانات بطلب تأكيد. */
-bot.onText(/\/delete/, (msg) => {
+bot.onText(/\/delete/, async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
     const keyboard = {
         inline_keyboard: [
             [{ text: "نعم، متأكد من الحذف", callback_data: 'confirm_delete' }],
@@ -80,7 +87,8 @@ bot.onText(/\/delete/, (msg) => {
         ],
     };
     
-    userStates[chatId] = { state: STATES.AWAIT_DELETE_CONFIRMATION, data: {} }; 
+    // حفظ حالة انتظار التأكيد في قاعدة البيانات
+    await updateUserState(userId, STATES.AWAIT_DELETE_CONFIRMATION, {}); 
 
     bot.sendMessage(chatId,
         "**تنبيه:** هل أنت متأكد من أنك تريد حذف جميع بياناتك المسجلة؟ لا يمكن التراجع عن هذا الإجراء.",
@@ -107,28 +115,32 @@ bot.onText(/\/view/, (msg) => {
 
 // --- دوال معالجة الرسائل حسب الحالة ---
 
-function handleAskName(msg) {
+async function handleAskName(msg, user) {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
     const userName = msg.text.trim();
     
-    userStates[chatId].data.name = userName;
-    userStates[chatId].state = STATES.ASK_USERNAME; 
+    // تحديث البيانات المؤقتة والحالة في DB
+    const newRegistrationData = { ...user.data, name: userName };
+    await updateUserState(userId, STATES.ASK_USERNAME, newRegistrationData); 
     
     bot.sendMessage(chatId,
-        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك.".`,
+        `شكراً يا ${userName}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @) حتى يتمكن الآخرون من التواصل معك. إذا لم يكن لديك معرّف، يرجى كتابة "لا يوجد".`,
         { parse_mode: 'Markdown' }
     );
 }
 
-function handleAskUsername(msg) {
+async function handleAskUsername(msg, user) {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
     const username = msg.text.trim(); 
 
     const cleanUsername = username === 'لا يوجد' ? 'لا يوجد' : (username.startsWith('@') ? username.substring(1) : username);
     
-    userStates[chatId].data.username = cleanUsername; 
-    userStates[chatId].state = STATES.ASK_SPECIALIZATION;
-
+    // تحديث البيانات المؤقتة والحالة في DB
+    const newRegistrationData = { ...user.data, username: cleanUsername };
+    await updateUserState(userId, STATES.ASK_SPECIALIZATION, newRegistrationData);
+    
     const keyboard = {
         inline_keyboard: [
             [{ text: "ذكاء اصطناعي", callback_data: 'AI' }],
@@ -143,21 +155,23 @@ function handleAskUsername(msg) {
     );
 }
 
-async function handleAskTechnologies(msg) {
+async function handleAskTechnologies(msg, user) {
     const chatId = msg.chat.id;
     const userId = msg.from.id; // Telegram User ID
     const technologies = msg.text.trim();
     
-    if (!userStates[chatId] || !userStates[chatId].data.name || !userStates[chatId].data.specialization) {
+    // التحقق من اكتمال البيانات المؤقتة من DB
+    if (!user.data || !user.data.name || !user.data.specialization) {
         bot.sendMessage(chatId, "عذراً، يبدو أن عملية التسجيل لم تكتمل. يرجى البدء من جديد باستخدام /start.");
-        userStates[chatId] = { state: STATES.IDLE, data: {} };
+        await updateUserState(userId, STATES.IDLE, {}); // مسح الحالة
         return;
     }
 
-    const { name, username, specialization } = userStates[chatId].data; 
+    const { name, username, specialization } = user.data; 
 
     try {
-        await saveUserData(userId, name, username, specialization, technologies);
+        // حفظ البيانات النهائية في DB (saveUserData أيضاً تعيد ضبط الحالة)
+        await saveUserData(userId, name, username, specialization, technologies); 
 
         bot.sendMessage(chatId,
             `شكراً جزيلاً! تم حفظ بياناتك بنجاح.\n\n` +
@@ -166,34 +180,34 @@ async function handleAskTechnologies(msg) {
             `**للتواصل:** @${username}\n` + 
             `التخصص: ${specialization}\n` +
             `التقنيات: ${technologies}\n\n` +
-            `يمكنك استخدام الأمر /view لعرض بيانات المسجلين حسب التخصص.`
+            `يمكنك استخدام الأمر /view لعرض بيانات المسجلين حسب التخصص.`,
+            { parse_mode: 'Markdown' }
         );
     } catch (error) {
          bot.sendMessage(chatId, "حدث خطأ أثناء حفظ البيانات في قاعدة البيانات. يرجى المحاولة مرة أخرى.");
          console.error('Save Data Error:', error.message);
+         // إعادة ضبط الحالة في حالة حدوث خطأ
+         await updateUserState(userId, STATES.IDLE, {}); 
     }
-
-    userStates[chatId] = { state: STATES.IDLE, data: {} };
 }
 
 // --- معالجات الـ Callback Query ---
 
-function handleSpecializationSelection(chatId, specializationKey, messageId) {
+async function handleSpecializationSelection(chatId, userId, specializationKey, messageId, user) {
     const specializationName = SPECIALIZATION_MAP[specializationKey];
 
     if (specializationName) {
-        userStates[chatId].data.specialization = specializationName;
-        userStates[chatId].state = STATES.ASK_TECHNOLOGIES;
+        // تحديث البيانات المؤقتة والحالة في DB
+        const newRegistrationData = { ...user.data, specialization: specializationName };
+        await updateUserState(userId, STATES.ASK_TECHNOLOGIES, newRegistrationData);
         
-        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\n يرجى ادخال التقنيات التي تعلمتها او تعمل على تعلمها `;
+        const newText = `✅ تم اختيار التخصص: **${specializationName}**.\n\nالآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها (مثل: Python, TensorFlow, Keras). يفضل الفصل بينها بفاصلة.`;
         
         editMessage(chatId, messageId, newText);
     }
 }
 
 async function handleDeleteConfirmation(chatId, userId, data, messageId) {
-    userStates[chatId] = { state: STATES.IDLE, data: {} }; 
-
     if (data === 'confirm_delete') {
         try {
             const deleted = await deleteUserByTelegramId(userId);
@@ -206,9 +220,13 @@ async function handleDeleteConfirmation(chatId, userId, data, messageId) {
         } catch (error) {
             editMessage(chatId, messageId, "حدث خطأ أثناء محاولة حذف البيانات.");
             console.error('Delete Data Error:', error.message);
+        } finally {
+             // ضمان إعادة ضبط الحالة إلى IDLE بعد محاولة الحذف
+            await updateUserState(userId, STATES.IDLE, {});
         }
     } else if (data === 'cancel_delete') {
         editMessage(chatId, messageId, "تم إلغاء عملية الحذف. بياناتك لم تتأثر.");
+        await updateUserState(userId, STATES.IDLE, {}); // إعادة ضبط الحالة
     }
 }
 
@@ -236,7 +254,7 @@ async function handleViewDataCallback(chatId, data, messageId) {
             });
         }
 
-        editMessage(chatId, messageId, responseText);
+        editMessage(chatId, messageId, responseText, null, 'Markdown');
         
     } catch (error) {
         editMessage(chatId, messageId, "حدث خطأ أثناء استرجاع البيانات.");
@@ -246,24 +264,29 @@ async function handleViewDataCallback(chatId, data, messageId) {
 
 
 // *** المعالج الشامل للرسائل النصية (Message Handler) ***
-bot.on('message', (msg) => {
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const state = userStates[chatId] ? userStates[chatId].state : STATES.IDLE;
+    const userId = msg.from.id;
     const text = msg.text;
 
+    // جلب حالة المستخدم وبياناته المؤقتة من قاعدة البيانات
+    const user = await getOrCreateUser(userId);
+    const state = user.state;
+
+    // تجاهل الأوامر التي تبدأ بـ / إذا كنا في حالة انتظار إدخال
     if (text && text.startsWith('/')) {
         return;
     }
 
     switch (state) {
         case STATES.ASK_NAME:
-            handleAskName(msg);
+            await handleAskName(msg, user);
             break;
         case STATES.ASK_USERNAME:
-            handleAskUsername(msg);
+            await handleAskUsername(msg, user);
             break;
         case STATES.ASK_TECHNOLOGIES:
-            handleAskTechnologies(msg);
+            await handleAskTechnologies(msg, user);
             break;
         case STATES.IDLE:
         default:
@@ -275,24 +298,28 @@ bot.on('message', (msg) => {
 });
 
 // *** معالج الـ Callback Query (Inline Keyboard Handler) ***
-bot.on('callback_query', (callbackQuery) => {
+bot.on('callback_query', async (callbackQuery) => {
     const message = callbackQuery.message;
     const chatId = message.chat.id;
     const data = callbackQuery.data;
     const userId = callbackQuery.from.id;
 
     bot.answerCallbackQuery(callbackQuery.id);
+    
+    // جلب حالة المستخدم من قاعدة البيانات
+    const user = await getOrCreateUser(userId);
+    const state = user.state;
 
-    if (userStates[chatId] && userStates[chatId].state === STATES.ASK_SPECIALIZATION) {
+    if (state === STATES.ASK_SPECIALIZATION) {
         if (Object.keys(SPECIALIZATION_MAP).includes(data)) {
-            handleSpecializationSelection(chatId, data, message.message_id);
+            await handleSpecializationSelection(chatId, userId, data, message.message_id, user);
         }
     } 
     else if (data.startsWith('view_')) {
-        handleViewDataCallback(chatId, data, message.message_id);
+        await handleViewDataCallback(chatId, data, message.message_id);
     }
-    else if (userStates[chatId] && userStates[chatId].state === STATES.AWAIT_DELETE_CONFIRMATION) {
-        handleDeleteConfirmation(chatId, userId, data, message.message_id);
+    else if (state === STATES.AWAIT_DELETE_CONFIRMATION) {
+        await handleDeleteConfirmation(chatId, userId, data, message.message_id);
     }
 });
 
