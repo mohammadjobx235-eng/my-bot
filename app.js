@@ -1,5 +1,3 @@
-// app.js
-
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const mongoose = require('mongoose');
@@ -12,32 +10,34 @@ dotenv.config();
 // متغيرات الإعداد (Configuration Variables)
 // ----------------------------------------------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
-// Render سيقوم بتحديد الـ PORT تلقائيًا، أو نستخدم 3000 كافتراضي
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI;
 
-// تهيئة البوت
+// تهيئة البوت بدون بولينج (No Polling) - مطلوب للـ Webhook
 const bot = new TelegramBot(BOT_TOKEN);
 
 // ----------------------------------------------------
 // تعاريف الحالة والنماذج (Models and States)
 // ----------------------------------------------------
+
 const STATES = {
-    AWAITING_NAME: 'awaiting_name',
-    AWAITING_USERNAME: 'awaiting_username', // حالة جديدة لطلب معرف التلجرام
-    AWAITING_SPECIALIZATION_SELECTION: 'awaiting_specialization_selection', // انتظار اختيار التخصص من الأزرار
-    AWAITING_TECHNOLOGIES: 'awaiting_technologies',
-    NONE: 'none',
+    ASK_NAME: 'ASK_NAME', // طلب الاسم
+    ASK_USERNAME: 'ASK_USERNAME', // طلب معرّف التلغرام (@username)
+    ASK_SPECIALIZATION: 'ASK_SPECIALIZATION', // طلب اختيار التخصص
+    ASK_TECHNOLOGIES: 'ASK_TECHNOLOGIES', // طلب إدخال قائمة التقنيات
+    AWAIT_DELETE_CONFIRMATION: 'AWAIT_DELETE_CONFIRMATION', // انتظار تأكيد الحذف
+    IDLE: 'IDLE', // حالة الانتظار أو الخمول
 };
 
-// نموذج المستخدم (User Model)
+// النموذج (User Model)
 const UserSchema = new mongoose.Schema({
-    chatId: { type: Number, required: true, unique: true },
+    // نستخدم telegramId (msg.from.id) كمعرّف فريد
+    telegramId: { type: Number, required: true, unique: true }, 
     name: String,
-    username: String, // حقل جديد لمعرف التلجرام (بدون @)
-    specialization: String, // سيتم تخزين الاسم بالعربية (مثلاً: "شبكات (Networking)")
-    technologies: [String],
-    is_admin: { type: Boolean, default: false }
+    telegram_username: String, // معرّف التلغرام (@اسم_المستخدم)
+    specialization: String,
+    technologies: String, // سلسلة نصية واحدة للتقنيات
+    registration_date: { type: Date, default: Date.now },
 });
 
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
@@ -46,17 +46,15 @@ const User = mongoose.models.User || mongoose.model('User', UserSchema);
 const userStates = {};
 
 const SPECIALIZATION_MAP = {
-    networking: "شبكات (Networking)",
-    software: "برمجيات (Software Development)",
-    ai: "ذكاء اصطناعي (AI)"
+    AI: "ذكاء اصطناعي",
+    Software: "برمجيات",
+    Networks: "شبكات"
 };
-
 
 // ----------------------------------------------------
 // دوال قاعدة البيانات (Database Functions)
 // ----------------------------------------------------
 
-// دالة الاتصال بقاعدة البيانات
 async function connectDB(uri) {
     try {
         await mongoose.connect(uri, {
@@ -65,21 +63,23 @@ async function connectDB(uri) {
         });
         console.log('MongoDB connected successfully. ✅');
     } catch (err) {
-        console.error('MongoDB connection error: MongooseServerSelectionError. تحقق من MONGO_URI وإعدادات IP Whitelist في Atlas.', err.message);
+        console.error('MongoDB connection error: تحقق من MONGO_URI وإعدادات IP Whitelist في Atlas.', err.message);
     }
 }
 
-// دالة حفظ بيانات المستخدم أو تحديثها
-async function saveUserData(chatId, data) {
+// دالة حفظ بيانات المستخدم أو تحديثها باستخدام telegramId
+async function saveUserData(telegramId, name, telegram_username, specialization, technologies) {
     try {
-        // إذا كان اسم المستخدم يبدأ بـ @ في البيانات، قم بإزالته للتخزين النظيف
-        if (data.username && data.username.startsWith('@')) {
-            data.username = data.username.substring(1);
-        }
-
         const result = await User.findOneAndUpdate(
-            { chatId },
-            { $set: data },
+            { telegramId },
+            { 
+                $set: { 
+                    name, 
+                    telegram_username, 
+                    specialization, 
+                    technologies 
+                } 
+            },
             { upsert: true, new: true }
         );
         return result;
@@ -88,259 +88,246 @@ async function saveUserData(chatId, data) {
     }
 }
 
-// دالة استرداد بيانات مستخدم واحد
-async function getUserData(chatId) {
+// دالة حذف بيانات المستخدم بواسطة telegramId
+async function deleteUserByTelegramId(telegramId) {
     try {
-        return await User.findOne({ chatId });
+        const result = await User.deleteOne({ telegramId });
+        return result.deletedCount > 0;
     } catch (error) {
-        console.error('Error retrieving user data:', error.message);
+        console.error('Error deleting user data:', error.message);
+        return false;
+    }
+}
+
+// دالة استرداد بيانات المستخدمين حسب التخصص
+async function getUsersBySpecialization(specialization) {
+    try {
+        return await User.find({ specialization }).sort({ name: 1 });
+    } catch (error) {
+        console.error('Error retrieving users by specialization:', error.message);
+        return [];
     }
 }
 
 // ----------------------------------------------------
-// دوال البوت (Bot Handlers)
+// دوال البوت (Bot Handlers - Message Commands)
 // ----------------------------------------------------
 
-function sendSpecializationKeyboard(chatId) {
-    const options = {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: SPECIALIZATION_MAP.networking, callback_data: 'spec_networking' }],
-                [{ text: SPECIALIZATION_MAP.software, callback_data: 'spec_software' }],
-                [{ text: SPECIALIZATION_MAP.ai, callback_data: 'spec_ai' }],
-            ],
-        },
-    };
-    bot.sendMessage(chatId, "الآن، من فضلك اختر تخصصك:", options);
-}
-
-function handleStart(chatId) {
-    userStates[chatId] = { state: STATES.AWAITING_NAME, data: { chatId } };
-    bot.sendMessage(chatId, "مرحباً! لنبدأ عملية التسجيل. ما هو اسمك الكامل؟");
-}
-
-function handleViewData(chatId) {
-    getUserData(chatId).then(user => {
-        if (!user) {
-            return bot.sendMessage(chatId, "لم يتم العثور على بيانات مسجلة لك. يرجى البدء باستخدام /start.");
-        }
-
-        const usernameDisplay = user.username ? `@${user.username}` : 'غير مسجل';
-        const message = `
-**بياناتك المسجلة:**
-**الاسم:** ${user.name || 'غير مسجل'}
-**معرف التلجرام:** ${usernameDisplay}
-**التخصص:** ${user.specialization || 'غير مسجل'}
-**التقنيات:** ${user.technologies && user.technologies.length > 0 ? user.technologies.join(', ') : 'غير مسجلة'}
-
-**لحذف بياناتك، استخدم الأمر /delete**
-        `;
-
-        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-    });
-}
-
-// دالة لمعالجة عرض جميع المستخدمين حسب التخصص
-async function handleListUsers(chatId) {
-    try {
-        const allUsers = await User.find({});
-        if (allUsers.length === 0) {
-            return bot.sendMessage(chatId, "لا يوجد مستخدمون مسجلون حالياً.");
-        }
-
-        const categorizedUsers = {};
-        Object.values(SPECIALIZATION_MAP).forEach(spec => {
-            categorizedUsers[spec] = [];
-        });
-
-        allUsers.forEach(user => {
-            const spec = user.specialization || 'تخصص غير محدد';
-            // التأكد من أن التخصص موجود في القائمة أو إضافته إذا كان مخصصاً
-            if (!categorizedUsers[spec]) {
-                categorizedUsers[spec] = [];
-            }
-            categorizedUsers[spec].push(user);
-        });
-
-        let response = "**قائمة المستخدمين المسجلين حسب التخصص:**\n\n";
-        let hasUsers = false;
-
-        for (const spec in categorizedUsers) {
-            const usersInSpec = categorizedUsers[spec];
-            if (usersInSpec.length > 0) {
-                hasUsers = true;
-                response += `**-- ${spec} (${usersInSpec.length}) --**\n`;
-                usersInSpec.forEach(user => {
-                    const usernameDisplay = user.username ? `@${user.username}` : 'معرف غير مسجل';
-                    const technologiesDisplay = user.technologies && user.technologies.length > 0
-                        ? `(التقنيات: ${user.technologies.join(', ')})`
-                        : '';
-                    response += `• ${user.name} | ${usernameDisplay} ${technologiesDisplay}\n`;
-                });
-                response += '\n';
-            }
-        }
-
-        if (!hasUsers) {
-             return bot.sendMessage(chatId, "لا يوجد مستخدمون مسجلون حالياً.");
-        }
-
-        bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
-
-    } catch (error) {
-        console.error('Error listing users:', error.message);
-        bot.sendMessage(chatId, "حدث خطأ أثناء محاولة عرض قائمة المستخدمين.");
-    }
-}
-
-
-// دالة معالجة ردود الـ Callback (مثل الضغط على زر)
-bot.on('callback_query', (query) => {
-    const chatId = query.message.chat.id;
-    const data = query.data;
-    const messageId = query.message.message_id;
-
-    bot.answerCallbackQuery(query.id); // إغلاق الإشعار البسيط
-
-    if (data.startsWith('spec_')) {
-        const specializationKey = data.substring(5);
-        handleSpecializationSelection(chatId, specializationKey, messageId);
-    } else if (data === 'confirm_delete') {
-        handleFinalDelete(chatId, messageId);
-    } else if (data === 'cancel_delete') {
-        bot.editMessageText('تم إلغاء عملية الحذف.', {
-            chat_id: chatId,
-            message_id: messageId
-        });
-    }
+/** يبدأ عملية إدخال البيانات. */
+bot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    userStates[chatId] = { state: STATES.ASK_NAME, data: { telegramId: msg.from.id } };
+    bot.sendMessage(chatId, "أهلاً بك! لنبدأ بتسجيل بياناتك. ما هو اسمك الكامل؟");
 });
 
+/** يلغي عملية إدخال البيانات. */
+bot.onText(/\/cancel/, (msg) => {
+    const chatId = msg.chat.id;
+    userStates[chatId] = { state: STATES.IDLE, data: {} };
+    bot.sendMessage(chatId, "تم إلغاء عملية إدخال البيانات. يمكنك البدء من جديد باستخدام الأمر /start.");
+});
+
+/** يبدأ عملية حذف البيانات. */
+bot.onText(/\/delete/, (msg) => {
+    const chatId = msg.chat.id;
+    const keyboard = [
+        [{ text: "نعم، متأكد من الحذف", callback_data: 'confirm_delete' }],
+        [{ text: "إلغاء الحذف", callback_data: 'cancel_delete' }],
+    ];
+    
+    userStates[chatId] = { state: STATES.AWAIT_DELETE_CONFIRMATION, data: {} }; 
+
+    bot.sendMessage(chatId,
+        "**تنبيه:** هل أنت متأكد من أنك تريد حذف جميع بياناتك المسجلة؟ لا يمكن التراجع عن هذا الإجراء.",
+        { reply_markup: { inline_keyboard: keyboard }, parse_mode: 'Markdown' }
+    );
+});
+
+/** يبدأ عملية عرض البيانات. */
+bot.onText(/\/view/, (msg) => {
+    const chatId = msg.chat.id;
+    const keyboard = [
+        [{ text: "عرض الذكاء الاصطناعي", callback_data: 'view_AI' }],
+        [{ text: "عرض البرمجيات", callback_data: 'view_Software' }],
+        [{ text: "عرض الشبكات", callback_data: 'view_Networks' }],
+    ];
+    bot.sendMessage(chatId,
+        "اختر التخصص الذي تود عرض بيانات المسجلين فيه:",
+        { reply_markup: { inline_keyboard: keyboard } }
+    );
+});
+
+
+// ----------------------------------------------------
+// دوال البوت (Bot Handlers - Message & Callback Logic)
+// ----------------------------------------------------
+
+/** معالجة اختيار التخصص. */
 function handleSpecializationSelection(chatId, specializationKey, messageId) {
     const specializationName = SPECIALIZATION_MAP[specializationKey];
 
     if (specializationName) {
-        // التأكد من وجود حالة المستخدم وتحديث البيانات
-        if (!userStates[chatId] || userStates[chatId].state !== STATES.AWAITING_SPECIALIZATION_SELECTION) {
-             return bot.sendMessage(chatId, 'عفواً، يرجى البدء باستخدام /start أولاً.');
-        }
-
         userStates[chatId].data.specialization = specializationName;
-        userStates[chatId].state = STATES.AWAITING_TECHNOLOGIES; // الحالة التالية: انتظار التقنيات
-
-        // تعديل الرسالة لضمان التغيير وتجنب خطأ "not modified"
+        userStates[chatId].state = STATES.ASK_TECHNOLOGIES;
+        
         bot.editMessageText(
             `✅ تم اختيار التخصص: **${specializationName}**.\n\n` +
-            "أخيراً، يرجى إدخال قائمة بالتقنيات التي تعمل عليها أو تتعلمها (مثل: Cisco, Python, TensorFlow). **افصل بينها بفاصلة**.",
+            "الآن، يرجى إدخال قائمة بالتقنيات التي تعمل عليها (مثل: Python, React, Cisco).",
             { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
         );
     }
 }
 
-function handleDeleteCommand(chatId) {
-    const options = {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "أؤكد الحذف", callback_data: 'confirm_delete' }],
-                [{ text: "إلغاء", callback_data: 'cancel_delete' }],
-            ],
-        },
-        parse_mode: 'Markdown'
-    };
-    bot.sendMessage(chatId, '**تأكيد الحذف:** هل أنت متأكد من رغبتك في حذف جميع بياناتك؟ لا يمكن التراجع عن هذا الإجراء.', options);
+/** معالجة ردود تأكيد حذف البيانات. */
+async function handleDeleteConfirmation(chatId, telegramId, data, messageId) {
+    userStates[chatId] = { state: STATES.IDLE, data: {} }; 
+
+    if (data === 'confirm_delete') {
+        const deleted = await deleteUserByTelegramId(telegramId);
+
+        if (deleted) {
+            bot.editMessageText(
+                "✅ تم حذف بياناتك من قاعدة البيانات بنجاح.",
+                { chat_id: chatId, message_id: messageId }
+            );
+        } else {
+            bot.editMessageText(
+                "⚠️ لم نتمكن من العثور على أي بيانات مسجلة باسمك لحذفها.",
+                { chat_id: chatId, message_id: messageId }
+            );
+        }
+    } else if (data === 'cancel_delete') {
+        bot.editMessageText(
+            "تم إلغاء عملية الحذف. بياناتك لم تتأثر.",
+            { chat_id: chatId, message_id: messageId }
+        );
+    }
 }
 
-async function handleFinalDelete(chatId, messageId) {
-    try {
-        const result = await User.deleteOne({ chatId });
+/** معالجة ردود عرض البيانات. */
+async function handleViewDataCallback(chatId, data, messageId) {
+    const specializationKey = data.replace('view_', '');
+    const specializationName = SPECIALIZATION_MAP[specializationKey];
 
-        if (result.deletedCount > 0) {
-            delete userStates[chatId];
-            bot.editMessageText('تم حذف بياناتك بالكامل بنجاح. يمكنك البدء من جديد باستخدام /start.', {
-                chat_id: chatId,
-                message_id: messageId // تعديل رسالة التأكيد الأصلية
-            });
+    try {
+        const users = await getUsersBySpecialization(specializationName); 
+        let responseText;
+        if (users.length === 0) {
+            responseText = `لا يوجد مسجلون في تخصص **${specializationName}** حتى الآن.`;
         } else {
-             bot.editMessageText('لم يتم العثور على بيانات لحذفها.', {
-                chat_id: chatId,
-                message_id: messageId
+            responseText = `**المسجلون في تخصص ${specializationName} (${users.length}):**\n\n`;
+            users.forEach(user => {
+                responseText += `**الاسم:** ${user.name}\n`;
+                // تأكد من استخدام telegram_username المخزن في قاعدة البيانات
+                responseText += `**للتواصل:** @${user.telegram_username || 'غير محدد'}\n`; 
+                responseText += `**التقنيات:** ${user.technologies || 'غير محدد'}\n`;
+                responseText += "----------\n";
             });
         }
+        bot.editMessageText(
+            responseText,
+            { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
+        );
     } catch (error) {
-        bot.sendMessage(chatId, 'حدث خطأ أثناء محاولة حذف البيانات.');
-        console.error('Error deleting user data:', error.message);
+        console.error("Error viewing data:", error);
+        bot.editMessageText(
+            "حدث خطأ أثناء استرجاع البيانات.",
+            { chat_id: chatId, message_id: messageId }
+        );
     }
 }
 
-
-// دالة معالجة الرسائل النصية
-bot.on('message', (msg) => {
+// *** المعالج الشامل للرسائل النصية ***
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+    const state = userStates[chatId] ? userStates[chatId].state : STATES.IDLE;
     const text = msg.text;
 
-    // معالجة الأوامر
-    if (text === '/start') {
-        return handleStart(chatId);
-    }
-    if (text === '/view') {
-        return handleViewData(chatId);
-    }
-    if (text === '/list') { // الأمر الجديد لعرض قائمة المستخدمين حسب التخصص
-        return handleListUsers(chatId);
-    }
-    if (text === '/delete') { // الأمر الجديد للحذف
-        return handleDeleteCommand(chatId);
+    // تجاهل الأوامر في معالج الرسائل العادية
+    if (text && text.startsWith('/')) {
+        return;
     }
 
-    // معالجة حالات إدخال البيانات
-    const userState = userStates[chatId];
-    if (!userState || userState.state === STATES.NONE) {
-        return bot.sendMessage(chatId, "يرجى استخدام الأمر /start للتسجيل، /view لعرض بياناتك، /list لعرض قائمة المسجلين، أو /delete للحذف.");
-    }
+    switch (state) {
+        case STATES.ASK_NAME:
+            userStates[chatId].data.name = text.trim();
+            userStates[chatId].state = STATES.ASK_USERNAME; 
+            
+            bot.sendMessage(chatId,
+                `شكراً يا ${text.trim()}. يرجى إدخال **معرّف التلغرام الخاص بك** (يبدأ بـ @ أو اسم المستخدم فقط) حتى يتمكن الآخرون من التواصل معك.`,
+                { parse_mode: 'Markdown' }
+            );
+            break;
+            
+        case STATES.ASK_USERNAME:
+            // تنظيف معرّف التلغرام
+            const username = text.trim().startsWith('@') ? text.trim().substring(1) : text.trim(); 
+            userStates[chatId].data.telegram_username = username; 
+            
+            userStates[chatId].state = STATES.ASK_SPECIALIZATION;
 
-    switch (userState.state) {
-        case STATES.AWAITING_NAME:
-            userState.data.name = text;
-            userState.state = STATES.AWAITING_USERNAME;
-            bot.sendMessage(chatId, "شكراً لك. الآن، يرجى إدخال **معرف التلجرام الخاص بك (Username)**. إذا لم يكن لديك، اكتب 'لا يوجد'.");
+            const keyboard = [
+                [{ text: "ذكاء اصطناعي", callback_data: 'AI' }],
+                [{ text: "برمجيات", callback_data: 'Software' }],
+                [{ text: "شبكات", callback_data: 'Networks' }],
+            ];
+            bot.sendMessage(chatId,
+                `رائع، تم حفظ معرّفك. الآن، ما هو تخصصك الرئيسي؟`,
+                { reply_markup: { inline_keyboard: keyboard } }
+            );
             break;
 
-        case STATES.AWAITING_USERNAME:
-            // تنظيف معرف المستخدم
-            userState.data.username = text === 'لا يوجد' ? null : (text.startsWith('@') ? text.substring(1) : text);
-            userState.state = STATES.AWAITING_SPECIALIZATION_SELECTION;
-            sendSpecializationKeyboard(chatId);
-            break;
-
-        // حالة انتظار اختيار التخصص يتم التعامل معها في callback_query
-
-        case STATES.AWAITING_TECHNOLOGIES:
-            const technologiesArray = text.split(',').map(t => t.trim()).filter(t => t.length > 0);
-
-            if (technologiesArray.length === 0) {
-                return bot.sendMessage(chatId, "يرجى إدخال قائمة بالتقنيات مفصولة بفاصلة.");
-            }
-
-            userState.data.technologies = technologiesArray;
-            userState.state = STATES.NONE;
+        case STATES.ASK_TECHNOLOGIES:
+            const technologies = text.trim();
+            
+            const { name, telegram_username, specialization } = userStates[chatId].data; 
 
             // حفظ البيانات في قاعدة البيانات
-            saveUserData(chatId, userState.data).then(savedUser => {
-                if (savedUser) {
-                    bot.sendMessage(chatId, "✅ تم حفظ بياناتك بنجاح! شكراً لك. يمكنك استخدام /view لعرضها أو /list لعرض قائمة المسجلين.");
-                } else {
-                    bot.sendMessage(chatId, "حدث خطأ في حفظ البيانات. يرجى المحاولة مرة أخرى.");
-                }
-                delete userStates[chatId];
-            }).catch(error => {
-                console.error('Error in final save:', error);
-                bot.sendMessage(chatId, "حدث خطأ غير متوقع أثناء الحفظ. يرجى البدء من جديد.");
-            });
+            await saveUserData(telegramId, name, telegram_username, specialization, technologies);
+
+            bot.sendMessage(chatId,
+                `شكراً جزيلاً! تم حفظ بياناتك بنجاح.\n` +
+                `الاسم: ${name}\n` +
+                `**معرّف التلغرام:** @${telegram_username}\n` + 
+                `التخصص: ${specialization}\n` +
+                `التقنيات: ${technologies}\n\n` +
+                `يمكنك استخدام الأمر /view لعرض بيانات المسجلين حسب التخصص.`
+            );
+            userStates[chatId] = { state: STATES.IDLE, data: {} };
             break;
 
+        case STATES.IDLE:
         default:
-            // حالة لا يجب الوصول إليها، لإعادة التوجيه الآمن
-            bot.sendMessage(chatId, "يرجى إكمال التسجيل أو استخدام /start للبدء من جديد.");
+            // رسالة افتراضية عند الخمول وعدم وجود أمر
+            if (!text.startsWith('/')) {
+                bot.sendMessage(chatId, "أنا بوت لتسجيل بيانات التخصصات. استخدم الأمر /start للبدء، /view لعرض البيانات، أو /delete لحذف بياناتك.");
+            }
             break;
+    }
+});
+
+
+// *** معالج الـ Callback Query ***
+bot.on('callback_query', (callbackQuery) => {
+    const message = callbackQuery.message;
+    const chatId = message.chat.id;
+    const telegramId = callbackQuery.from.id; // استخدام معرّف المرسل من الـ callback
+    const data = callbackQuery.data;
+
+    bot.answerCallbackQuery(callbackQuery.id); // إغلاق الإشعار البسيط
+
+    // معالجة اختيار التخصص (ضمن سير تسجيل البيانات)
+    if (userStates[chatId] && userStates[chatId].state === STATES.ASK_SPECIALIZATION) {
+        handleSpecializationSelection(chatId, data, message.message_id);
+    } 
+    // معالجة عرض البيانات
+    else if (data.startsWith('view_')) {
+        handleViewDataCallback(chatId, data, message.message_id);
+    }
+    // معالجة تأكيد الحذف
+    else if (userStates[chatId] && userStates[chatId].state === STATES.AWAIT_DELETE_CONFIRMATION) {
+        handleDeleteConfirmation(chatId, telegramId, data, message.message_id);
     }
 });
 
@@ -350,20 +337,18 @@ bot.on('message', (msg) => {
 // ----------------------------------------------------
 
 const app = express();
-const WEBHOOK_URL_PATH = `/${BOT_TOKEN}`; // مسار سري للـ Webhook (يستخدم التوكن)
+const WEBHOOK_URL_PATH = `/${BOT_TOKEN}`;
 
 // معالج JSON لـ Express
 app.use(express.json());
 
 // 1. معالج مسار الـ Webhook (لاستقبال الرسائل من تيليجرام)
 app.post(WEBHOOK_URL_PATH, (req, res) => {
-    // تمرير تحديث تيليجرام إلى معالج البوت
-    bot.processUpdate(req.body);
-    // يجب الرد بـ 200 OK بسرعة لتجنب تكرار إرسال الرسالة من تيليجرام
-    res.sendStatus(200);
+    bot.processUpdate(req.body); 
+    res.sendStatus(200); 
 });
 
-// 2. مسار افتراضي (للتأكد من أن الخدمة تعمل)
+// 2. مسار افتراضي
 app.get('/', (req, res) => {
     res.send('Telegram Bot Webhook Service is running.');
 });
@@ -372,17 +357,17 @@ app.get('/', (req, res) => {
 connectDB(MONGO_URI).then(() => {
     app.listen(PORT, () => {
         console.log(`Express server is listening on port ${PORT}`);
-
+        
         // تعيين الـ Webhook على تيليجرام
-        // Render يحدد متغير البيئة RENDER_EXTERNAL_URL الذي يحتوي على رابط النشر العام
-        const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_URL_PATH}`;
+        const fullWebhookUrl = `${process.env.RENDER_EXTERNAL_URL || 'YOUR_PUBLIC_URL_HERE'}${WEBHOOK_URL_PATH}`;
 
         if (process.env.RENDER_EXTERNAL_URL) {
             bot.setWebHook(fullWebhookUrl)
                 .then(() => console.log(`Webhook successfully set to: ${fullWebhookUrl}`))
                 .catch(err => console.error('Error setting webhook:', err));
         } else {
-            console.warn('RENDER_EXTERNAL_URL is not defined. Webhook not set.');
+            // هذا الجزء فقط للبيئات التي لا تحدد الرابط الخارجي تلقائياً
+            console.warn('RENDER_EXTERNAL_URL is not defined. Webhook not set. Please set it manually for production.');
         }
     });
 });
